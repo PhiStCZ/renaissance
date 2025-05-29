@@ -1,5 +1,9 @@
 package org.renaissance.scala.sat
 
+import java.util.concurrent.Executors
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import cafesat.api.FormulaBuilder.and
 import cafesat.api.FormulaBuilder.or
 import cafesat.api.FormulaBuilder.propVar
@@ -18,17 +22,19 @@ object Solver {
    * Solver takes a sudoku problem as a matrix of optional integers
    * and fills in the missing values to form a correct Sudoku grid.
    */
-  def solve(sudoku: Array[Array[Option[Int]]]): Option[Array[Array[Int]]] = {
+  def solve(sudoku: Array[Array[Option[Int]]], sqrt_dim: Int): Option[Array[Array[Int]]] = {
+
+    val dim = sqrt_dim*sqrt_dim
 
     /**
-     * Each slot on the Sudoku board has 9 associated variables (V0..V8),
+     * Each slot on the Sudoku board has `dim` associated variables (V0..V[dim-1]),
      * each variable Vi denoting whether the digit Vi was chosen for the
      * respective slot.
      */
-    require(sudoku.length == 9)
-    require(sudoku.forall(row => row.length == 9))
+    require(sudoku.length == dim)
+    require(sudoku.forall(row => row.length == dim))
 
-    val vars = sudoku.map(row => row.map(_ => Array.fill(9)(propVar())))
+    val vars = sudoku.map(row => row.map(_ => Array.fill(dim)(propVar())))
 
     /**
      * There should be at least one digit chosen for each sudoku slot.
@@ -36,44 +42,44 @@ object Solver {
     val onePerEntry = vars.flatMap(row => row.map(vs => or(vs.toIndexedSeq: _*)))
 
     /**
-     * There must be at most one any digit in each 3x3 table.
-     * Here, `k` is the variable (digit), `i` and `j` are the coordinates of the 3x3 tables,
-     * `r1` and `r2` are row pairs within the 3x3 table, and `c1` and `c2` are pairs of
-     * columns within the 3x3 table.
+     * There must be at most one any digit in each sqrt_dim*sqrt_dim table.
+     * Here, `k` is the variable (digit), `i` and `j` are the coordinates of the sqrt_dim*sqrt_dim tables,
+     * `r1` and `r2` are row pairs within the sqrt_dim*sqrt_dim table, and `c1` and `c2` are pairs of
+     * columns within the sqrt_dim*sqrt_dim table.
      */
     val uniqueInGrid1 =
       for (
-        k <- 0 to 8; i <- 0 to 2; j <- 0 to 2; r <- 0 to 2;
-        c1 <- 0 to 1; c2 <- c1 + 1 to 2
+        k <- 0 until dim; i <- 0 until sqrt_dim; j <- 0 until sqrt_dim; r <- 0 until sqrt_dim;
+        c1 <- 0 to 1; c2 <- c1 + 1 until sqrt_dim
       )
-        yield !vars(3 * i + r)(3 * j + c1)(k) || !vars(3 * i + r)(3 * j + c2)(k)
+        yield !vars(sqrt_dim * i + r)(sqrt_dim * j + c1)(k) || !vars(sqrt_dim * i + r)(sqrt_dim * j + c2)(k)
 
     val uniqueInGrid2 =
       for (
-        k <- 0 to 8; i <- 0 to 2; j <- 0 to 2; r1 <- 0 to 2;
-        c1 <- 0 to 2; c2 <- 0 to 2; r2 <- r1 + 1 to 2
+        k <- 0 until dim; i <- 0 until sqrt_dim; j <- 0 until sqrt_dim; r1 <- 0 until sqrt_dim;
+        c1 <- 0 until sqrt_dim; c2 <- 0 until sqrt_dim; r2 <- r1 + 1 until sqrt_dim
       )
-        yield !vars(3 * i + r1)(3 * j + c1)(k) || !vars(3 * i + r2)(3 * j + c2)(k)
+        yield !vars(sqrt_dim * i + r1)(sqrt_dim * j + c1)(k) || !vars(sqrt_dim * i + r2)(sqrt_dim * j + c2)(k)
 
     /**
      * In the respective column, there should be at most one unique digit.
      */
     val uniqueInColumns =
-      for (c <- 0 to 8; k <- 0 to 8; r1 <- 0 to 7; r2 <- r1 + 1 to 8)
+      for (c <- 0 until dim; k <- 0 until dim; r1 <- 0 until (dim-1); r2 <- (r1+1) until dim)
         yield !vars(r1)(c)(k) || !vars(r2)(c)(k)
 
     /**
      * In the respective row, there should be at most one unique digit.
      */
     val uniqueInRows =
-      for (r <- 0 to 8; k <- 0 to 8; c1 <- 0 to 7; c2 <- c1 + 1 to 8)
+      for (r <- 0 until dim; k <- 0 until dim; c1 <- 0 until (dim-1); c2 <- (c1+1) until dim)
         yield !vars(r)(c1)(k) || !vars(r)(c2)(k)
 
     /**
      * Force entry with a possible number.
      */
     val forcedEntries =
-      for (r <- 0 to 8; c <- 0 to 8 if sudoku(r)(c).isDefined)
+      for (r <- 0 until dim; c <- 0 until dim if sudoku(r)(c).isDefined)
         yield or(vars(r)(c)(sudoku(r)(c).get - 1))
 
     /**
@@ -97,54 +103,105 @@ object Solver {
 @Summary("Solves Sudoku Puzzles using Scala collections.")
 @Licenses(Array(License.MIT))
 @Repetitions(20)
+@Parameter(name = "sqrt_dim", defaultValue = "3")
+@Parameter(name = "copies", defaultValue = "1")
+@Parameter(name = "threads", defaultValue = "1")
+@Parameter(name = "kill_after_seconds", defaultValue = "300")
 @Configuration(name = "test")
 @Configuration(name = "jmh")
 final class ScalaDoku extends Benchmark {
 
-  /*
-   * An arbitrary solved sudoku puzzle. The puzzle is copied and some entries
-   * are changed to have an unsolved version for the algorithm to solve it again.
-   */
-  private val SOLVED_PUZZLE = Array(
-    Array(6, 7, 9, 2, 8, 5, 3, 1, 4),
-    Array(1, 4, 8, 9, 6, 3, 5, 2, 7),
-    Array(2, 3, 5, 1, 7, 4, 8, 6, 9),
-    Array(5, 6, 4, 3, 1, 9, 2, 7, 8),
-    Array(8, 1, 3, 5, 2, 7, 4, 9, 6),
-    Array(9, 2, 7, 8, 4, 6, 1, 5, 3),
-    Array(3, 8, 6, 7, 5, 1, 9, 4, 2),
-    Array(7, 5, 2, 4, 9, 8, 6, 3, 1),
-    Array(4, 9, 1, 6, 3, 2, 7, 8, 5)
-  )
+  private var solved_puzzle: Array[Array[Int]] = _
+  private var puzzles: Array[ Array[Array[Option[Int]]] ] = _
 
-  private var puzzleWithAFewHoles: Array[Array[Option[Int]]] = _
+  private def prepareSolvedPuzzle(sqrt_dim: Int) = {
+    /* Example for n=3:
 
-  private var puzzleWithOneHole: Array[Array[Option[Int]]] = _
+    1 2 3   4 5 6   7 8 9
+    4 5 6   7 8 9   1 2 3
+    7 8 9   1 2 3   4 5 6
 
-  private def preparePuzzleWithAFewHoles() = {
-    val result = SOLVED_PUZZLE.map(row => row.map(i => Some(i): Option[Int]))
-    result(0)(0) = None
-    result(4)(8) = None
-    result(7)(7) = None
-    result
+    2 3 4   5 6 7   8 9 1
+    5 6 7   8 9 1   2 3 4
+    8 9 1   2 3 4   5 6 7
+
+    3 4 5   6 7 8   9 1 2
+    6 7 8   9 1 2   3 4 5
+    9 1 2   3 4 5   6 7 8
+    */
+    val dim = sqrt_dim*sqrt_dim
+    val puzzle = new Array[Array[Int]](dim)
+
+    for (big_i <- 0 until sqrt_dim) {
+      for (small_i <- 0 until sqrt_dim) {
+        val i = sqrt_dim*big_i + small_i
+        puzzle(i) = new Array[Int](dim)
+        for (j <- 0 until dim) {
+          puzzle(i)(j) = ((big_i + sqrt_dim*small_i + j) % dim) + 1
+        }
+      }
+    }
+
+    puzzle
   }
 
-  private def preparePuzzleWithOneHole() = {
-    val result = SOLVED_PUZZLE.map(row => row.map(i => Some(i): Option[Int]))
-    result(2)(7) = None
+  private def preparePuzzleWithAFewHoles(solved_puzzle: Array[Array[Int]]) = {
+    val result = solved_puzzle.map(row => row.map(i => Some(i): Option[Int]))
+    val permutation = new scala.util.Random(42).shuffle(Range(0, solved_puzzle.length))
+
+    for (j <- 0 until solved_puzzle.length) {
+      result(j)(permutation(j)) = None
+    }
+
     result
   }
 
   override def setUpBeforeAll(c: BenchmarkContext): Unit = {
-    puzzleWithAFewHoles = preparePuzzleWithAFewHoles()
-    puzzleWithOneHole = preparePuzzleWithOneHole()
+    val sqrt_dim = c.parameter("sqrt_dim").toPositiveInteger
+    val copies = c.parameter("copies").toPositiveInteger
+
+    solved_puzzle = prepareSolvedPuzzle(sqrt_dim)
+
+    puzzles = new Array[ Array[Array[Option[Int]]] ](copies)
+    for (c <- 0 until copies) {
+      puzzles(c) = preparePuzzleWithAFewHoles(solved_puzzle)
+    }
   }
 
   override def run(c: BenchmarkContext): BenchmarkResult = {
-    Validators.compound(
-      new DokuResult(Solver.solve(puzzleWithAFewHoles), SOLVED_PUZZLE),
-      new DokuResult(Solver.solve(puzzleWithOneHole), SOLVED_PUZZLE)
-    )
+    val sqrt_dim = c.parameter("sqrt_dim").toPositiveInteger
+    val copies = c.parameter("copies").toPositiveInteger
+    val threads = c.parameter("threads").toPositiveInteger
+    val kill_after_seconds = c.parameter("kill_after_seconds").toPositiveInteger
+
+    val results: Array[BenchmarkResult] = new Array[BenchmarkResult](copies)
+
+    val executor: ExecutorService = Executors.newFixedThreadPool(threads)
+    for (i <- 0 until copies) {
+      val fi = i
+      executor.submit(() => {
+        results(fi) = new DokuResult(Solver.solve(puzzles(i), sqrt_dim), solved_puzzle)
+        null
+      })
+    }
+    executor.shutdown()
+
+    try {
+      if (!executor.awaitTermination(kill_after_seconds, TimeUnit.SECONDS)) {
+        executor.shutdownNow()
+        throw new InterruptedException("scala-doku computation took too long; terminating.")
+      }
+    } catch {
+      case e: InterruptedException => {
+        throw e
+      }
+      case e: Throwable => {
+        executor.shutdownNow()
+        throw new Exception("Unexpected exception occured in scala-doku.", e)
+      }
+    }
+
+    Validators.compound(results:_*)
   }
 
   final class DokuResult(actual: Option[Array[Array[Int]]], expected: Array[Array[Int]])
